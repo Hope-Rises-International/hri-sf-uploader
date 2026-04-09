@@ -98,15 +98,23 @@ SF Uploader (Drive root)/
 │   └── Uploaded NonDonor Files/                 ← Master Kill List CSVs (validation artifact)
 ```
 
-**Critical:** Original file only moves to "Files to Delete" after ALL steps succeed.
-If any step fails, stop immediately and leave files in place.
+**Critical:** If any step fails, stop immediately and leave files in place.
 
-**SA ownership caveat:** The SA can only move files it owns. Files dropped by
-users via browser get archived via copy+rename (prefixed `PROCESSED_`). The
-query filter excludes `PROCESSED_` files from re-processing.
+**Duplicate prevention:** Before uploading, checks if a file with that name
+already exists in the target folder. Before processing, checks if an output
+already exists in the Processed folder (skip-if-already-processed).
+
+**Originals stay in Files to Process** — operator clears them manually after review.
 
 ### Expected Volume
 Typical Non Donor files: 50–200 rows, rarely over 500. Flag anomalies.
+
+## Known Limitations
+
+Drive API with impersonated ADC cannot move or delete files owned by other users.
+Pipeline copies outputs to destination folders but cannot remove originals from
+Files to Process. Operator manually clears processed files. Phase B (Cloud Run
+with runtime SA) resolves this — SA owns all files it creates from SFTP download.
 
 ## Salesforce Mapping (Phase C reference)
 
@@ -119,11 +127,16 @@ Target object: `npsp__DataImport__c` (Insert). Batch name format:
 - Built Phase A triage pipeline (`pipeline.py`) and verified with sample data
 - Refactored from local filesystem to Google Drive API for all file I/O
 - SA (`hri-sfdc-sync@hri-receipt-automation`) shared on Drive folder and Kill List sheet
-- **SA can't move files it doesn't own** — fallback: copy to archive + rename original with `PROCESSED_` prefix. Query excludes `PROCESSED_` files. In Phase B (Cloud Run), SA will own files it downloads from SFTP, so this won't apply.
 - Actual CSV columns differ from spec: file has `CGDT`, `Donation Gift Source`, `Batch Name`, `Donation Donor` instead of `DNRAMT`, `DNRDDT`, `TRFLAG`, `TRACK`, `TRCHK#`, `TRPTYP`, `TRMBID`. Pipeline works with whatever columns exist.
 - Sample data: 113 rows → 77 kill list (prefix `3`), 2 reclassified (`S`, `0` → CONSID), 36 SF-bound
-- Empty CSV handling: header-only files skip cleanly and get archived
 - Kill List sheet had ~14,073 existing rows from CoWork automation, with sparse gaps
+
+### Session 2 — 2026-04-09: I/O cleanup + test sheet
+- Removed PROCESSED_ rename/move-to-archive approach — originals stay in Files to Process, operator clears manually
+- Added skip-if-already-processed: checks for existing output in Processed folder before re-processing
+- Added duplicate prevention: checks target folder before uploading any CSV
+- Switched Kill List sheet ID to test sheet (`1I-LBd6AQO0EhcHX1dqBHzbSBr9w12yNzgIlgN_Jtb3M`) — production ID preserved in code comment
+- Empty file handling: skip cleanly (no archive attempt), Household files ignored by query
 
 ---
 

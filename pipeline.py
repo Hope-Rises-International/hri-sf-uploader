@@ -7,7 +7,6 @@ and uploads cleaned output CSVs back to Drive.
 """
 
 import csv
-import io
 import os
 import sys
 import tempfile
@@ -26,7 +25,8 @@ DELETE_FOLDER_ID = "1TU-3i7dZI5fiGHJpfylbJcJxgHyvekJa"       # Claude Files to D
 PROCESSED_FOLDER_ID = "1mq5KGIHvMErycZ6U1RAikzzOu3OaKQrs"    # Claude Processed Non Donor Files
 UPLOADED_FOLDER_ID = "1KNUK-mx-6qv_FjnZ4ubwQh0T-OcOqg_j"    # Uploaded NonDonor Files
 
-KILL_LIST_SHEET_ID = "11dM2Pf-E195rJUnF79rMHhN5RUb0L-03fS8nZ4WZw7o"
+# TEST SHEET — production ID: 11dM2Pf-E195rJUnF79rMHhN5RUb0L-03fS8nZ4WZw7o
+KILL_LIST_SHEET_ID = "1I-LBd6AQO0EhcHX1dqBHzbSBr9w12yNzgIlgN_Jtb3M"
 KILL_LIST_SHEET_NAME = "Sheet1"
 
 # FINDER prefixes that indicate a donor constituent ID, not an acquisition finder
@@ -55,14 +55,10 @@ def get_services():
 # ── Drive helpers ──────────────────────────────────────────────────────────────
 
 def list_non_donor_csvs(drive):
-    """Find *Non Donors*.csv files in the Files to Process folder.
-
-    Excludes files prefixed with PROCESSED_ (already archived via fallback).
-    """
+    """Find *Non Donors*.csv files in the Files to Process folder."""
     q = (
         f"'{INPUT_FOLDER_ID}' in parents"
         " and name contains 'Non Donors'"
-        " and not name contains 'PROCESSED_'"
         " and mimeType='text/csv'"
         " and trashed=false"
     )
@@ -73,6 +69,23 @@ def list_non_donor_csvs(drive):
         fields="files(id, name)",
     ).execute()
     return result.get("files", [])
+
+
+def file_exists_in_folder(drive, filename, folder_id):
+    """Check if a file with the given name already exists in a folder."""
+    q = (
+        f"'{folder_id}' in parents"
+        f" and name = '{filename}'"
+        " and trashed=false"
+    )
+    result = drive.files().list(
+        q=q,
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+        fields="files(id)",
+        pageSize=1,
+    ).execute()
+    return len(result.get("files", [])) > 0
 
 
 def download_file(drive, file_id, dest_path):
@@ -96,39 +109,6 @@ def upload_csv(drive, local_path, filename, parent_folder_id):
         fields="id, name",
     ).execute()
     return result["id"]
-
-
-def move_file(drive, file_id, from_folder_id, to_folder_id):
-    """Move a file from one Drive folder to another.
-
-    Falls back to copy-to-dest if the SA doesn't own the file (common in
-    Phase A where users drop files via browser). The original stays in place
-    but is renamed with a PROCESSED_ prefix so it won't be picked up again.
-    """
-    try:
-        drive.files().update(
-            fileId=file_id,
-            addParents=to_folder_id,
-            removeParents=from_folder_id,
-            supportsAllDrives=True,
-        ).execute()
-    except Exception:
-        # SA can't move files it doesn't own — copy to archive instead
-        name = drive.files().get(
-            fileId=file_id, supportsAllDrives=True, fields="name"
-        ).execute()["name"]
-        drive.files().copy(
-            fileId=file_id,
-            body={"name": name, "parents": [to_folder_id]},
-            supportsAllDrives=True,
-        ).execute()
-        # Rename original so it won't be re-processed
-        drive.files().update(
-            fileId=file_id,
-            body={"name": f"PROCESSED_{name}"},
-            supportsAllDrives=True,
-        ).execute()
-        print(f"    (copied to archive; original renamed PROCESSED_{name})")
 
 
 # ── Sheets helpers ─────────────────────────────────────────────────────────────
@@ -286,10 +266,16 @@ def process_file(file_info, sheets, drive, tmpdir):
     """Process a single Non Donor CSV file through the full pipeline.
 
     file_info: dict with 'id' and 'name' from Drive API.
+    Returns result dict, or None if skipped.
     """
     file_id = file_info["id"]
     filename = file_info["name"]
     print(f"\nProcessing: {filename} (Drive ID: {file_id})")
+
+    # Check if already processed — SF-bound CSV exists in output folder
+    if file_exists_in_folder(drive, filename, PROCESSED_FOLDER_ID):
+        print(f"  Already processed (output exists in Processed folder) — skipping")
+        return None
 
     # Download to temp
     local_path = os.path.join(tmpdir, filename)
@@ -297,9 +283,7 @@ def process_file(file_info, sheets, drive, tmpdir):
 
     # Check for empty file
     if is_empty_csv(local_path):
-        print(f"  {filename} — empty file, skipping")
-        move_file(drive, file_id, INPUT_FOLDER_ID, DELETE_FOLDER_ID)
-        print(f"  Moved to Claude Files to Delete")
+        print(f"  Empty file (header only) — skipping")
         return None
 
     # Read CSV — all columns as strings
@@ -347,16 +331,24 @@ def process_file(file_info, sheets, drive, tmpdir):
         start, end, count = 0, 0, 0
         print("  Sheet: no Kill List rows to append")
 
-    # Upload output CSVs to Drive
-    sf_file_id = upload_csv(drive, sf_csv_path, sf_csv_name, PROCESSED_FOLDER_ID)
-    print(f"  SF CSV uploaded → {sf_csv_name} (ID: {sf_file_id})")
+    # Upload SF-bound CSV (with duplicate check)
+    sf_file_id = None
+    if file_exists_in_folder(drive, sf_csv_name, PROCESSED_FOLDER_ID):
+        print(f"  SF CSV: {sf_csv_name} already exists in Processed — skipped upload")
+    else:
+        sf_file_id = upload_csv(drive, sf_csv_path, sf_csv_name, PROCESSED_FOLDER_ID)
+        print(f"  SF CSV uploaded → {sf_csv_name} (ID: {sf_file_id})")
 
-    master_file_id = upload_csv(drive, master_csv_path, master_csv_name, UPLOADED_FOLDER_ID)
-    print(f"  Master Kill List CSV uploaded → {master_csv_name} (ID: {master_file_id})")
+    # Upload Master Kill List CSV (with duplicate check)
+    master_file_id = None
+    if file_exists_in_folder(drive, master_csv_name, UPLOADED_FOLDER_ID):
+        print(f"  Master Kill CSV: {master_csv_name} already exists in Uploaded — skipped upload")
+    else:
+        master_file_id = upload_csv(drive, master_csv_path, master_csv_name, UPLOADED_FOLDER_ID)
+        print(f"  Master Kill CSV uploaded → {master_csv_name} (ID: {master_file_id})")
 
-    # Archive original — LAST step, only after everything succeeds
-    move_file(drive, file_id, INPUT_FOLDER_ID, DELETE_FOLDER_ID)
-    print(f"  Original archived → Claude Files to Delete")
+    # Originals stay in Files to Process — operator clears them manually.
+    # SA cannot move/delete files owned by other users via impersonated ADC.
 
     return {
         "filename": filename,
@@ -393,12 +385,15 @@ def main():
 
     # Process each file using a temp directory for local I/O
     results = []
+    skipped = 0
     with tempfile.TemporaryDirectory(prefix="aegis_") as tmpdir:
         for file_info in files:
             try:
                 result = process_file(file_info, sheets, drive, tmpdir)
                 if result:
                     results.append(result)
+                else:
+                    skipped += 1
             except Exception as e:
                 print(f"\nERROR processing {file_info['name']}: {e}")
                 print("  Stopping. File left in Files to Process for retry.")
@@ -408,7 +403,7 @@ def main():
     print("\n" + "=" * 60)
     print("PROCESSING COMPLETE")
     print("=" * 60)
-    print(f"Files processed: {len(results)}")
+    print(f"Files processed: {len(results)}, skipped: {skipped}")
     total_kill = 0
     total_sf = 0
     for r in results:
@@ -418,12 +413,19 @@ def main():
         print(f"    Salesforce:      {r['sf_rows']}")
         if r["sheet_appended"]:
             print(f"    Sheet rows:      {r['sheet_start']}–{r['sheet_end']} ({r['sheet_appended']} appended)")
-        print(f"    SF CSV:          {r['sf_csv_name']} (ID: {r['sf_csv_id']}) → Processed Non Donor Files")
-        print(f"    Master Kill CSV: {r['master_csv_name']} (ID: {r['master_csv_id']}) → Uploaded NonDonor Files")
+        if r["sf_csv_id"]:
+            print(f"    SF CSV:          {r['sf_csv_name']} (ID: {r['sf_csv_id']}) → Processed Non Donor Files")
+        else:
+            print(f"    SF CSV:          {r['sf_csv_name']} (already existed)")
+        if r["master_csv_id"]:
+            print(f"    Master Kill CSV: {r['master_csv_name']} (ID: {r['master_csv_id']}) → Uploaded NonDonor Files")
+        else:
+            print(f"    Master Kill CSV: {r['master_csv_name']} (already existed)")
         total_kill += r["kill_list_rows"]
         total_sf += r["sf_rows"]
 
     print(f"\nTotals: {total_kill} Kill List + {total_sf} Salesforce = {total_kill + total_sf}")
+    print("\nNote: Originals remain in Files to Process — clear them manually after review.")
 
 
 if __name__ == "__main__":
