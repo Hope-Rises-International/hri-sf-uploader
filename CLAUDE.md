@@ -2,25 +2,48 @@
 
 ## About this project
 
-<!-- Replace this section with a brief description of what this project is,
-     how it's deployed, and what systems it connects to. Keep it to 5-10 lines.
-     This is the first thing a new session reads — make it count. -->
+Aegis Non Donor CSV pipeline — replaces fragile CoWork browser automation with
+a Python CLI that triages Aegis (Moore DM Group) Non Donor files, writes
+suppression records to a Kill List Google Sheet via API, and produces cleaned
+CSVs for Salesforce import.
+
+- **Phase A (this build):** Local CSV → Python triage → Kill List Sheet + cleaned CSV output
+- **Phase B (future):** Cloud Run + SFTP pull, automated daily, email notification
+- **Phase C (future):** Salesforce REST push from staging sheet with approval workflow
+
+**Key systems:** Google Sheets API, GCP ADC (service account impersonation),
+Salesforce `npsp__DataImport__c` (Phase C). No browser automation.
 
 ## Authentication
 
-This project authenticates via GCP service account impersonation. All API calls
-(Sheets, Cloud Run, Salesforce, Secret Manager) go through:
+### Phase A (local development)
+
+Authenticate via GCP service account impersonation. The service account used
+for local development is:
 
     hri-sfdc-sync@hri-receipt-automation.iam.gserviceaccount.com
 
-Developers authenticate with their own @hoperises.org account and impersonate
-the service account. Setup:
+Setup:
 
     gcloud auth application-default login \
       --impersonate-service-account hri-sfdc-sync@hri-receipt-automation.iam.gserviceaccount.com
 
-Do NOT use personal ADC (`gcloud auth application-default login` without
-impersonation). Do NOT create or download service account key files.
+Do NOT use personal ADC without impersonation. Do NOT create or download SA key files.
+
+**First-run verification:** Before processing any files, read a cell from the
+Kill List sheet to confirm the SA has editor access. If permission error, share
+the sheet with the SA email.
+
+### Phase B/C (Cloud Run)
+
+ADC resolves automatically to Cloud Run runtime identity:
+`hri-sfdc-sync@hri-receipt-automation.iam.gserviceaccount.com`. The Kill List
+sheet must be shared with this SA before Phase B deployment. No auth code
+changes between local and deployed.
+
+**GCP project:** `hri-receipt-automation` — same project as all other
+SF-connected Cloud Run services (`sync-receipts`, `campaign-scorecard-refresh`,
+`sf-data-refresh`, `donor-brief-builder`).
 
 ## Stack Learnings (canonical source)
 
@@ -32,19 +55,75 @@ Stack-level learnings live in ONE place:
 
 Do NOT create a local `learnings.md` or `hri-stack-learnings.md` in this repo. If one exists, merge any unique content upstream and delete the local copy.
 
+## Key Resources
+
+- **Kill List Google Sheet:** `11dM2Pf-E195rJUnF79rMHhN5RUb0L-03fS8nZ4WZw7o` (Sheet 1 / gid=0)
+- **Drive working folder:** https://drive.google.com/drive/u/0/folders/1siDdLdqDHavOOj7gI_DVitdqBmc_m3X6
+  - Root: `1siDdLdqDHavOOj7gI_DVitdqBmc_m3X6` (SF Uploader)
+  - Input: `1JCzwnbqZrfhHyruSlIJ_z7AyIHOjr3md` (Files to Process)
+  - Archive: `1TU-3i7dZI5fiGHJpfylbJcJxgHyvekJa` (Claude Files to Delete)
+  - Output: `1mq5KGIHvMErycZ6U1RAikzzOu3OaKQrs` (Claude Processed Non Donor Files)
+  - Kill CSVs: `1KNUK-mx-6qv_FjnZ4ubwQh0T-OcOqg_j` (Uploaded NonDonor Files)
+- **Build spec:** See `pasted-text-2026-04-09` or the original spec in the repo
+- **Related system:** `hri-gmail-pdf-deposit` handles Aegis PDF attachments (different channel, no overlap)
+
+## Pipeline Logic Summary
+
+### Input
+- Two CSV files from Aegis FTP: one Non Donor, one Household
+- Phase A processes **only** Non Donor files (filename contains "Non Donors")
+- **All columns read as strings** — no type inference (zip codes, IDs, flags)
+
+### Triage (Steps 1–4)
+1. Sort by FINDER (empties last)
+2. Reclassify: FINDER starting with `0`, `7`, or `S` → move value to CONSID, clear FINDER
+3. Re-sort by FINDER (empties last)
+4. Split: non-empty FINDER → Kill List; empty FINDER → Salesforce-bound
+
+### Kill List Output (Step 5)
+- 8-column dataset: First Name, Last Name, Street 1, Street 2 (empty), City, State, Zip, Suppress Date (`m/d/yy`)
+- Master Kill List CSV: all original columns minus SUFFX1, plus empty STREET2 after STREET
+- Append to Google Sheet after last populated row (**scan full sheet** — sparse data, gaps from old CoWork automation)
+
+### Salesforce Output (Step 6)
+- Cleaned CSV with all original columns, original filename
+
+### File I/O (Google Drive)
+All file I/O uses Drive API — no local filesystem dependency.
+```
+SF Uploader (Drive root)/
+├── Files to Process/                            ← drop Non Donor CSVs here
+├── Claude Files to Delete/                      ← originals archived (LAST step)
+├── Claude Processed Non Donor Files/            ← SF-bound CSVs
+│   └── Uploaded NonDonor Files/                 ← Master Kill List CSVs (validation artifact)
+```
+
+**Critical:** Original file only moves to "Files to Delete" after ALL steps succeed.
+If any step fails, stop immediately and leave files in place.
+
+**SA ownership caveat:** The SA can only move files it owns. Files dropped by
+users via browser get archived via copy+rename (prefixed `PROCESSED_`). The
+query filter excludes `PROCESSED_` files from re-processing.
+
+### Expected Volume
+Typical Non Donor files: 50–200 rows, rarely over 500. Flag anomalies.
+
+## Salesforce Mapping (Phase C reference)
+
+Target object: `npsp__DataImport__c` (Insert). Batch name format:
+`ALMMMDDYYYY Non Donors` / `ALMMMDDYYYY Households`. Full field mapping in build spec.
+
 ## Project knowledge
 
-<!-- This section grows over time. Every session that makes meaningful changes
-     should append what it learned. This is where compound value accrues.
-
-     Good entries answer: What would the NEXT session need to know?
-     - Decisions made and WHY (not just what changed — git log has that)
-     - Things that are fragile or non-obvious
-     - What was tried and didn't work (so nobody tries it again)
-     - Patterns discovered in the data or the APIs
-     - Gotchas that aren't obvious from reading the code
-
-     Bad entries: "Updated foo.py" (that's a commit message, not knowledge) -->
+### Session 1 — 2026-04-09: Phase A build + Drive refactor
+- Built Phase A triage pipeline (`pipeline.py`) and verified with sample data
+- Refactored from local filesystem to Google Drive API for all file I/O
+- SA (`hri-sfdc-sync@hri-receipt-automation`) shared on Drive folder and Kill List sheet
+- **SA can't move files it doesn't own** — fallback: copy to archive + rename original with `PROCESSED_` prefix. Query excludes `PROCESSED_` files. In Phase B (Cloud Run), SA will own files it downloads from SFTP, so this won't apply.
+- Actual CSV columns differ from spec: file has `CGDT`, `Donation Gift Source`, `Batch Name`, `Donation Donor` instead of `DNRAMT`, `DNRDDT`, `TRFLAG`, `TRACK`, `TRCHK#`, `TRPTYP`, `TRMBID`. Pipeline works with whatever columns exist.
+- Sample data: 113 rows → 77 kill list (prefix `3`), 2 reclassified (`S`, `0` → CONSID), 36 SF-bound
+- Empty CSV handling: header-only files skip cleanly and get archived
+- Kill List sheet had ~14,073 existing rows from CoWork automation, with sparse gaps
 
 ---
 

@@ -4,6 +4,14 @@
 credentials.json
 token.json
 
+# Data files — never commit CSVs or sample data
+Claude Non Donor Files/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
 # Node (if using clasp locally)
 node_modules/
 
