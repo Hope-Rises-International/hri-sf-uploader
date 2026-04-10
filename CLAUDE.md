@@ -7,12 +7,12 @@ a Python CLI that triages Aegis (Moore DM Group) Non Donor files, writes
 suppression records to a Kill List Google Sheet via API, and produces cleaned
 CSVs for Salesforce import.
 
-- **Phase A (this build):** Local CSV → Python triage → Kill List Sheet + cleaned CSV output
-- **Phase B (future):** Cloud Run + SFTP pull, automated daily, email notification
-- **Phase C (future):** Salesforce REST push from staging sheet with approval workflow
+- **Phase A:** Complete, production. CLI triage → Kill List Sheet + cleaned CSV output
+- **Phase B:** Cloud Run `/process` endpoint, Drive-based (no SFTP), daily schedule TBD
+- **Phase C (future):** `/push` endpoint, Apps Script menu trigger on staging sheet, SF insert via SObject Collections
 
-**Key systems:** Google Sheets API, GCP ADC (service account impersonation),
-Salesforce `npsp__DataImport__c` (Phase C). No browser automation.
+**Key systems:** Google Sheets API, Google Drive API, Gmail API, GCP ADC,
+Salesforce `npsp__DataImport__c` (Phase C). No browser automation. No SFTP in any phase.
 
 ## Authentication
 
@@ -64,7 +64,11 @@ Do NOT create a local `learnings.md` or `hri-stack-learnings.md` in this repo. I
   - Archive: `1TU-3i7dZI5fiGHJpfylbJcJxgHyvekJa` (Claude Files to Delete)
   - Output: `1mq5KGIHvMErycZ6U1RAikzzOu3OaKQrs` (Claude Processed Non Donor Files)
   - Kill CSVs: `1KNUK-mx-6qv_FjnZ4ubwQh0T-OcOqg_j` (Uploaded NonDonor Files)
-- **Build spec:** See `pasted-text-2026-04-09` or the original spec in the repo
+- **Aegis Staging Sheet:** `1qSxi7YBtZ2VsYpDXGKGz0539Gc9bIMKIR1PTNj7ibCU`
+  - Tabs: "Non Donor" (SF-bound records), "Household" (future)
+  - Columns: Salesforce API field names + Status + Processed Date
+  - Shared with Bill, Bekah, and SA
+- **Build spec:** `Aegis_NonDonor_Pipeline_Build_Spec.md` in repo root
 - **Related system:** `hri-gmail-pdf-deposit` handles Aegis PDF attachments (different channel, no overlap)
 
 ## Pipeline Logic Summary
@@ -114,50 +118,51 @@ Typical Non Donor files: 50–200 rows, rarely over 500. Flag anomalies.
 Target object: `npsp__DataImport__c` (Insert). Batch name format:
 `ALMMMDDYYYY Non Donors` / `ALMMMDDYYYY Households`. Full field mapping in build spec.
 
-## Phase B/C — Build Plan
+## Architecture
 
-### Phase B: SFTP Automation
-- Cloud Run service deployed to `hri-receipt-automation` project
-- Runtime SA: `hri-sfdc-sync@hri-receipt-automation.iam.gserviceaccount.com`
-- Endpoint: `/pull`
-- Triggered by Cloud Scheduler (daily, time TBD)
-- Flow:
-  1. Connect to Aegis SFTP (credentials in Secret Manager)
-  2. Download Non Donor and Household CSV files
-  3. Run Phase A triage logic on Non Donor file
-  4. Write Kill List rows to production Google Sheet (11dM2Pf-E195rJUnF79rMHhN5RUb0L-03fS8nZ4WZw7o)
-  5. Write SF-bound Non Donor records to a staging Google Sheet (to be created)
-  6. Household file passes through untouched to its own staging sheet tab
-  7. Send notification email to Bekah (bschwanbeck@hoperises.org) via Gmail API with:
-     - File date and record counts
-     - Link to Kill List sheet
-     - Link to staging sheet for her review
+### Code structure
+- `config.py` — shared config (folder IDs, sheet IDs, API scopes, `get_services()`)
+- `triage.py` — pure triage logic (sort, reclassify, split, CSV I/O). No API calls.
+- `pipeline.py` — CLI entry point for manual runs (Phase A)
+- `app.py` — Flask Cloud Run service with `/process` and `/health` endpoints (Phase B)
+- `Dockerfile` — Cloud Run deployment container
 
-### Phase C: Salesforce Push
-- Endpoint: `/push` on same Cloud Run service (single repo, single deployment)
-- Trigger: Apps Script custom menu button on the staging sheet
-- Flow:
-  1. Bekah reviews records in staging sheet
-  2. Clicks "Approve for Upload" in custom Sheets menu
-  3. Apps Script calls UrlFetchApp.fetch() to Cloud Run `/push` endpoint
-  4. Cloud Run reads approved rows from staging sheet
-  5. Inserts to npsp__DataImport__c via Salesforce REST API (SObject Collections, 200-record batches)
-  6. Sends confirmation email to Bekah with success count and any failures
-  7. Marks staging sheet rows as uploaded with timestamp
-  8. Bekah triggers BDI manually in Salesforce — do NOT automate BDI
-- Batch naming: ALMMMDDYYYY Non Donors (e.g., ALM04102026 Non Donors)
-- Apps Script: bound to staging sheet, single menu function, ~15 lines. Bill builds, Bekah authorizes on first use.
+### Phase B: Cloud Run `/process` endpoint
+- Scans Drive "Files to Process" folder for new Non Donor CSVs
+- Runs triage (identical logic to Phase A CLI)
+- Writes Kill List rows to production sheet
+- Writes SF-bound rows to staging sheet "Non Donor" tab with status "pending"
+- Sends notification email to Bekah via Gmail API
+- No SFTP — Bekah manually drops files into Drive folder
 
-### Post-Deploy Checklist (Phase B/C)
+### Phase C: `/push` endpoint (future)
+- Apps Script custom menu button on staging sheet triggers Cloud Run `/push`
+- Reads approved rows, inserts to `npsp__DataImport__c` via SObject Collections
+- Sends confirmation email, marks rows as uploaded
+- Bekah triggers BDI manually — do NOT automate
+
+### Cloud Scheduler (not yet created)
+```bash
+gcloud scheduler jobs create http aegis-non-donor-process \
+  --project=hri-receipt-automation \
+  --location=us-east1 \
+  --schedule="0 8 * * 1-5" \
+  --uri="https://CLOUD_RUN_URL/process" \
+  --http-method=POST \
+  --oidc-service-account-email=hri-sfdc-sync@hri-receipt-automation.iam.gserviceaccount.com \
+  --oidc-token-audience="https://CLOUD_RUN_URL"
+```
+Schedule TBD — waiting on Bekah for typical file arrival time.
+
+### Post-Deploy Checklist
 After deploying to hri-receipt-automation, verify these existing services still work:
-- sync-receipts
-- campaign-scorecard-refresh
-- sf-data-refresh
-- donor-brief-builder
+- sync-receipts, campaign-scorecard-refresh, sf-data-refresh, donor-brief-builder
 Force-run all Cloud Scheduler jobs and confirm invocation in Cloud Run logs.
 
-### Known Limitation (Phase A, resolved in Phase B)
-Drive API with impersonated ADC cannot move or delete files owned by other users. Phase A leaves originals in Files to Process — operator clears manually. Phase B resolves this because Cloud Run SA owns all files it creates from SFTP download.
+### Known Limitations
+- ADC impersonation cannot move or delete files owned by other users in Drive
+- Originals stay in Files to Process — operator clears manually
+- SA Drive storage quota exceeded — new sheets/files must be created inside shared folders (not SA root)
 
 ## Project knowledge
 
@@ -175,6 +180,15 @@ Drive API with impersonated ADC cannot move or delete files owned by other users
 - Added duplicate prevention: checks target folder before uploading any CSV
 - Switched Kill List sheet ID to test sheet (`1I-LBd6AQO0EhcHX1dqBHzbSBr9w12yNzgIlgN_Jtb3M`) — production ID preserved in code comment
 - Empty file handling: skip cleanly (no archive attempt), Household files ignored by query
+
+### Session 3 — 2026-04-10: Phase B build
+- Created Aegis Staging sheet (`1qSxi7YBtZ2VsYpDXGKGz0539Gc9bIMKIR1PTNj7ibCU`) with Non Donor and Household tabs
+- Refactored: extracted `config.py` (shared config), `triage.py` (pure logic), kept `pipeline.py` as CLI
+- Built `app.py` — Flask Cloud Run service with `/process` endpoint
+- `/process` endpoint: triage + Kill List sheet + staging sheet write + Gmail notification to Bekah
+- SA can't create top-level Drive files (quota exceeded) — must create inside shared folders
+- No SFTP in any phase — Bekah drops files manually into Drive "Files to Process"
+- Staging sheet columns use Salesforce API field names + Status + Processed Date
 
 ---
 
