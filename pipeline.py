@@ -25,8 +25,8 @@ DELETE_FOLDER_ID = "1TU-3i7dZI5fiGHJpfylbJcJxgHyvekJa"       # Claude Files to D
 PROCESSED_FOLDER_ID = "1mq5KGIHvMErycZ6U1RAikzzOu3OaKQrs"    # Claude Processed Non Donor Files
 UPLOADED_FOLDER_ID = "1KNUK-mx-6qv_FjnZ4ubwQh0T-OcOqg_j"    # Uploaded NonDonor Files
 
-# TEST SHEET — production ID: 11dM2Pf-E195rJUnF79rMHhN5RUb0L-03fS8nZ4WZw7o
-KILL_LIST_SHEET_ID = "1I-LBd6AQO0EhcHX1dqBHzbSBr9w12yNzgIlgN_Jtb3M"
+# Production Kill List sheet
+KILL_LIST_SHEET_ID = "11dM2Pf-E195rJUnF79rMHhN5RUb0L-03fS8nZ4WZw7o"
 KILL_LIST_SHEET_NAME = "Sheet1"
 
 # FINDER prefixes that indicate a donor constituent ID, not an acquisition finder
