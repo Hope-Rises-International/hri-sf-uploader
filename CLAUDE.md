@@ -109,17 +109,55 @@ already exists in the Processed folder (skip-if-already-processed).
 ### Expected Volume
 Typical Non Donor files: 50–200 rows, rarely over 500. Flag anomalies.
 
-## Known Limitations
-
-Drive API with impersonated ADC cannot move or delete files owned by other users.
-Pipeline copies outputs to destination folders but cannot remove originals from
-Files to Process. Operator manually clears processed files. Phase B (Cloud Run
-with runtime SA) resolves this — SA owns all files it creates from SFTP download.
-
 ## Salesforce Mapping (Phase C reference)
 
 Target object: `npsp__DataImport__c` (Insert). Batch name format:
 `ALMMMDDYYYY Non Donors` / `ALMMMDDYYYY Households`. Full field mapping in build spec.
+
+## Phase B/C — Build Plan
+
+### Phase B: SFTP Automation
+- Cloud Run service deployed to `hri-receipt-automation` project
+- Runtime SA: `hri-sfdc-sync@hri-receipt-automation.iam.gserviceaccount.com`
+- Endpoint: `/pull`
+- Triggered by Cloud Scheduler (daily, time TBD)
+- Flow:
+  1. Connect to Aegis SFTP (credentials in Secret Manager)
+  2. Download Non Donor and Household CSV files
+  3. Run Phase A triage logic on Non Donor file
+  4. Write Kill List rows to production Google Sheet (11dM2Pf-E195rJUnF79rMHhN5RUb0L-03fS8nZ4WZw7o)
+  5. Write SF-bound Non Donor records to a staging Google Sheet (to be created)
+  6. Household file passes through untouched to its own staging sheet tab
+  7. Send notification email to Bekah (bschwanbeck@hoperises.org) via Gmail API with:
+     - File date and record counts
+     - Link to Kill List sheet
+     - Link to staging sheet for her review
+
+### Phase C: Salesforce Push
+- Endpoint: `/push` on same Cloud Run service (single repo, single deployment)
+- Trigger: Apps Script custom menu button on the staging sheet
+- Flow:
+  1. Bekah reviews records in staging sheet
+  2. Clicks "Approve for Upload" in custom Sheets menu
+  3. Apps Script calls UrlFetchApp.fetch() to Cloud Run `/push` endpoint
+  4. Cloud Run reads approved rows from staging sheet
+  5. Inserts to npsp__DataImport__c via Salesforce REST API (SObject Collections, 200-record batches)
+  6. Sends confirmation email to Bekah with success count and any failures
+  7. Marks staging sheet rows as uploaded with timestamp
+  8. Bekah triggers BDI manually in Salesforce — do NOT automate BDI
+- Batch naming: ALMMMDDYYYY Non Donors (e.g., ALM04102026 Non Donors)
+- Apps Script: bound to staging sheet, single menu function, ~15 lines. Bill builds, Bekah authorizes on first use.
+
+### Post-Deploy Checklist (Phase B/C)
+After deploying to hri-receipt-automation, verify these existing services still work:
+- sync-receipts
+- campaign-scorecard-refresh
+- sf-data-refresh
+- donor-brief-builder
+Force-run all Cloud Scheduler jobs and confirm invocation in Cloud Run logs.
+
+### Known Limitation (Phase A, resolved in Phase B)
+Drive API with impersonated ADC cannot move or delete files owned by other users. Phase A leaves originals in Files to Process — operator clears manually. Phase B resolves this because Cloud Run SA owns all files it creates from SFTP download.
 
 ## Project knowledge
 
