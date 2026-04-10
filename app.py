@@ -22,7 +22,7 @@ from config import (
     KILL_LIST_SHEET_ID, KILL_LIST_SHEET_NAME,
     STAGING_SHEET_ID, STAGING_NON_DONOR_TAB,
     MIN_EXPECTED_ROWS, MAX_EXPECTED_ROWS,
-    NOTIFY_EMAIL,
+    NOTIFY_EMAIL, GMAIL_SENDER,
     get_services,
 )
 from triage import (
@@ -241,6 +241,7 @@ def send_notification(gmail, results):
     body = "\n".join(lines)
     message = MIMEText(body)
     message["to"] = NOTIFY_EMAIL
+    message["from"] = GMAIL_SENDER
     message["subject"] = f"Aegis Non Donor Processing Complete — {datetime.now().strftime('%m/%d/%Y')}"
 
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
